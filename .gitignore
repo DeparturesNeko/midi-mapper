@@ -1,0 +1,6 @@
+*.exe
+*.obj
+*.o
+*.d
+w64devkit/
+w64devkit.exe
