@@ -5,10 +5,15 @@ MIDI 信号读取与键盘鼠标映射工具。读取计算机上的 MIDI 输入
 ## 功能
 
 - **多设备支持**：枚举所有 MIDI 输入设备，支持同时打开多个设备
-- **实时监控**：查看所有 MIDI 消息（音符、CC、弯音等），方便手动配置映射
+- **实时监控**：查看所有 MIDI 消息（Note On/Off、CC、Pitch Bend、Aftertouch 等），方便手动配置映射
+- **三种触发模式**：
+  - `hold` — 按住直到释放（适合键盘类设备）
+  - `toggle` — 按一次开，再按一次关（适合打击垫切换状态）
+  - `tap` — 按下后自动释放（适合电子鼓等瞬间触发设备）
 - **键盘映射**：MIDI 音符 → 键盘按键（支持单键和组合键）
 - **鼠标映射**：MIDI 音符 → 鼠标点击，CC 控制器 → 鼠标移动/滚轮
-- **可配置**：通过 `midi_map.ini` 文件自定义映射规则
+- **自定义 CC 名称**：在配置文件中为你的设备定义 CC 编号的含义
+- **可配置**：通过 `midi_map.ini` 文件自定义所有映射规则
 
 ## 快速开始
 
@@ -16,7 +21,7 @@ MIDI 信号读取与键盘鼠标映射工具。读取计算机上的 MIDI 输入
 2. 输入 `list` 查看 MIDI 设备
 3. 输入 `open 0` 打开第一个设备
 4. 输入 `monitor on` 查看实时 MIDI 信号
-5. 根据看到的音符号编辑 `midi_map.ini`
+5. 根据看到的音符号/CC号编辑 `midi_map.ini`
 6. 输入 `reload` 重新加载配置
 
 ## 命令列表
@@ -29,6 +34,7 @@ MIDI 信号读取与键盘鼠标映射工具。读取计算机上的 MIDI 输入
 | `openall` | 打开所有设备 |
 | `monitor [on/off]` | 开关实时 MIDI 监控 |
 | `mapping [on/off]` | 开关键鼠映射 |
+| `mode <hold/toggle/tap>` | 切换触发模式（运行时） |
 | `reload` | 重新加载配置文件 |
 | `status` | 显示当前状态 |
 | `quit` | 退出程序 |
@@ -44,10 +50,25 @@ MIDI 信号读取与键盘鼠标映射工具。读取计算机上的 MIDI 输入
 
 ### CC映射 [CCMap]
 ```ini
-1 = MOUSE_MOVE_Y    # 调制轮 -> 鼠标Y轴
-7 = MOUSE_MOVE_X    # 音量 -> 鼠标X轴
-10 = MOUSE_SCROLL   # 声像 -> 鼠标滚轮
-64 = KEY_SPACE       # 延音踏板 -> 空格键
+1 = MOUSE_MOVE_Y    # CC1 -> 鼠标Y轴
+7 = MOUSE_MOVE_X    # CC7 -> 鼠标X轴
+10 = MOUSE_SCROLL   # CC10 -> 鼠标滚轮
+64 = KEY_SPACE       # CC64 -> 空格键 (>=64按下, <64释放)
+```
+
+### 自定义CC名称 [CCNames]
+```ini
+# 为你的设备定义CC编号含义，monitor显示时更清晰
+4 = Hi-Hat Pedal     # 电子鼓踩镲
+16 = EQ High         # DJ控制器
+```
+
+### 设置 [Settings]
+```ini
+mouse_sensitivity = 30     # 鼠标灵敏度 (1-100)
+cc_deadzone = 2            # CC死区
+note_mode = hold           # 触发模式: hold / toggle / tap
+tap_duration = 50          # tap模式按键持续时间(ms)
 ```
 
 ### 支持的动作
@@ -58,9 +79,9 @@ MIDI 信号读取与键盘鼠标映射工具。读取计算机上的 MIDI 输入
 - 鼠标: `MOUSE_LEFT`, `MOUSE_RIGHT`, `MOUSE_MIDDLE`
 - 鼠标移动: `MOUSE_MOVE_X`, `MOUSE_MOVE_Y`, `MOUSE_SCROLL`
 
-## 编译（如需修改源码）
+## 编译
 
-需要 MinGW g++，编译命令：
+需要 MinGW g++：
 ```
 g++ -O2 -std=c++17 -o midi_mapper.exe midi_mapper.cpp -lwinmm -static
 ```
