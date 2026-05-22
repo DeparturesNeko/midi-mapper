@@ -1,5 +1,5 @@
 /*
- * MIDI Mapper v1.0 - MIDI to Keyboard/Mouse Mapper
+ * MIDI Mapper v1.1 - MIDI to Keyboard/Mouse Mapper
  * Compile: g++ -O2 -std=c++17 -o midi_mapper.exe midi_mapper.cpp -lwinmm -static
  */
 #define WIN32_LEAN_AND_MEAN
@@ -17,9 +17,22 @@
 #include <mutex>
 #include <algorithm>
 #include <atomic>
+#include <thread>
 
 #pragma comment(lib, "winmm.lib")
 using namespace std;
+
+// ==================== Note Mode ====================
+enum NoteMode { MODE_HOLD = 0, MODE_TOGGLE, MODE_TAP };
+
+static string noteModeName(NoteMode m) {
+    switch (m) {
+        case MODE_HOLD: return "hold";
+        case MODE_TOGGLE: return "toggle";
+        case MODE_TAP: return "tap";
+    }
+    return "hold";
+}
 
 // ==================== Note/CC Names ====================
 static const char* NOTE_NAMES[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
@@ -27,14 +40,15 @@ static string getNoteName(int n) {
     if (n < 0 || n > 127) return "?";
     return string(NOTE_NAMES[n % 12]) + to_string(n / 12 - 1);
 }
-static string getCCName(int cc) {
-    switch(cc) {
+
+static string getStdCCName(int cc) {
+    switch (cc) {
         case 0: return "Bank Select"; case 1: return "Mod Wheel";
         case 2: return "Breath"; case 4: return "Foot";
         case 7: return "Volume"; case 10: return "Pan";
         case 11: return "Expression"; case 64: return "Sustain";
         case 65: return "Portamento"; case 66: return "Sostenuto";
-        default: return "CC" + to_string(cc);
+        default: return "";
     }
 }
 
@@ -109,14 +123,36 @@ namespace InputSim {
     }
 }
 
+// ==================== Velocity Handler (placeholder) ====================
+// Called on every Note On event. Reserved for future velocity-based features
+// e.g. velocity threshold filtering, velocity-to-mouse-distance, dynamic layers
+static void onVelocityEvent(int note, int velocity, const string& noteName) {
+    (void)note;
+    (void)velocity;
+    (void)noteName;
+    // TODO: implement velocity-based logic here
+}
+
 // ==================== Mapping Manager ====================
 class MappingManager {
 public:
     map<int, Action> noteMap;
     map<int, Action> ccMap;
+    map<int, string> ccNames;      // user-defined CC names from [CCNames]
+    map<int, bool> toggleState;    // toggle mode state tracking
     int sensitivity = 30;
     int ccDeadzone = 2;
+    NoteMode noteMode = MODE_HOLD;
+    int tapDuration = 50;          // ms for tap mode
     map<int, int> lastCCVal;
+
+    string getCCDisplayName(int cc) {
+        auto it = ccNames.find(cc);
+        if (it != ccNames.end()) return it->second;
+        string std = getStdCCName(cc);
+        if (!std.empty()) return "CC" + to_string(cc) + "(" + std + ")";
+        return "CC" + to_string(cc);
+    }
 
     Action parseAction(const string& s) {
         Action a;
@@ -144,10 +180,34 @@ public:
         return a;
     }
 
+    // Helper: execute press for an action
+    void execPress(const Action& a) {
+        switch (a.type) {
+            case ACT_KEY: InputSim::pressKey(a.keys[0]); break;
+            case ACT_KEY_COMBO: InputSim::pressCombo(a.keys); break;
+            case ACT_MOUSE_L: InputSim::mouseDown(MOUSEEVENTF_LEFTDOWN); break;
+            case ACT_MOUSE_R: InputSim::mouseDown(MOUSEEVENTF_RIGHTDOWN); break;
+            case ACT_MOUSE_M: InputSim::mouseDown(MOUSEEVENTF_MIDDLEDOWN); break;
+            default: break;
+        }
+    }
+
+    // Helper: execute release for an action
+    void execRelease(const Action& a) {
+        switch (a.type) {
+            case ACT_KEY: InputSim::releaseKey(a.keys[0]); break;
+            case ACT_KEY_COMBO: InputSim::releaseCombo(a.keys); break;
+            case ACT_MOUSE_L: InputSim::mouseUp(MOUSEEVENTF_LEFTUP); break;
+            case ACT_MOUSE_R: InputSim::mouseUp(MOUSEEVENTF_RIGHTUP); break;
+            case ACT_MOUSE_M: InputSim::mouseUp(MOUSEEVENTF_MIDDLEUP); break;
+            default: break;
+        }
+    }
+
     bool loadFromFile(const string& path) {
         ifstream f(path);
         if (!f.is_open()) return false;
-        noteMap.clear(); ccMap.clear();
+        noteMap.clear(); ccMap.clear(); ccNames.clear(); toggleState.clear();
         string line, section;
         while (getline(f, line)) {
             size_t start = line.find_first_not_of(" \t\r\n");
@@ -167,48 +227,73 @@ public:
             key.erase(0, key.find_first_not_of(" \t"));
             val.erase(val.find_last_not_of(" \t\r\n")+1);
             val.erase(0, val.find_first_not_of(" \t"));
+
             if (section == "NoteMap") {
                 noteMap[atoi(key.c_str())] = parseAction(val);
             } else if (section == "CCMap") {
                 ccMap[atoi(key.c_str())] = parseAction(val);
+            } else if (section == "CCNames") {
+                ccNames[atoi(key.c_str())] = val;
             } else if (section == "Settings") {
                 if (key == "mouse_sensitivity") sensitivity = atoi(val.c_str());
                 if (key == "cc_deadzone") ccDeadzone = atoi(val.c_str());
+                if (key == "tap_duration") tapDuration = atoi(val.c_str());
+                if (key == "note_mode") {
+                    if (val == "hold") noteMode = MODE_HOLD;
+                    else if (val == "toggle") noteMode = MODE_TOGGLE;
+                    else if (val == "tap") noteMode = MODE_TAP;
+                }
             }
         }
         return true;
     }
 
     void execNoteOn(int note, int vel) {
+        onVelocityEvent(note, vel, getNoteName(note));
+
         auto it = noteMap.find(note);
         if (it == noteMap.end()) return;
-        Action& a = it->second;
-        switch (a.type) {
-            case ACT_KEY: InputSim::pressKey(a.keys[0]); break;
-            case ACT_KEY_COMBO: InputSim::pressCombo(a.keys); break;
-            case ACT_MOUSE_L: InputSim::mouseDown(MOUSEEVENTF_LEFTDOWN); break;
-            case ACT_MOUSE_R: InputSim::mouseDown(MOUSEEVENTF_RIGHTDOWN); break;
-            case ACT_MOUSE_M: InputSim::mouseDown(MOUSEEVENTF_MIDDLEDOWN); break;
-            default: break;
+        const Action& a = it->second;
+
+        switch (noteMode) {
+        case MODE_HOLD:
+            execPress(a);
+            break;
+        case MODE_TOGGLE:
+            if (toggleState[note]) {
+                execRelease(a);
+                toggleState[note] = false;
+            } else {
+                execPress(a);
+                toggleState[note] = true;
+            }
+            break;
+        case MODE_TAP: {
+            execPress(a);
+            Action acopy = a;
+            int dur = tapDuration;
+            thread([this, acopy, dur]() {
+                Sleep(dur);
+                execRelease(acopy);
+            }).detach();
+            break;
+        }
         }
     }
+
     void execNoteOff(int note) {
+        // In toggle and tap modes, Note Off is ignored
+        if (noteMode == MODE_TOGGLE || noteMode == MODE_TAP) return;
+        // MODE_HOLD: release on Note Off
         auto it = noteMap.find(note);
         if (it == noteMap.end()) return;
-        Action& a = it->second;
-        switch (a.type) {
-            case ACT_KEY: InputSim::releaseKey(a.keys[0]); break;
-            case ACT_KEY_COMBO: InputSim::releaseCombo(a.keys); break;
-            case ACT_MOUSE_L: InputSim::mouseUp(MOUSEEVENTF_LEFTUP); break;
-            case ACT_MOUSE_R: InputSim::mouseUp(MOUSEEVENTF_RIGHTUP); break;
-            case ACT_MOUSE_M: InputSim::mouseUp(MOUSEEVENTF_MIDDLEUP); break;
-            default: break;
-        }
+        execRelease(it->second);
     }
+
     void execCC(int cc, int val) {
         auto it = ccMap.find(cc);
         if (it == ccMap.end()) return;
-        Action& a = it->second;
+        const Action& a = it->second;
         int lastVal = 64;
         if (lastCCVal.count(cc)) lastVal = lastCCVal[cc];
         int delta = val - lastVal;
@@ -280,13 +365,23 @@ void CALLBACK MidiCallback(HMIDIIN hMidi, UINT msg, DWORD_PTR inst,
         } else if (mtype == 0xB0) {
             auto it = g_mapper.ccMap.find(data1);
             if (it != g_mapper.ccMap.end()) actStr = " -> " + it->second.name;
-            printf("[%s] [%-20s] CC       ch=%-2d cc=%-3d %-16s val=%-3d%s\n",
-                   ts.c_str(), devName.c_str(), ch, data1,
-                   getCCName(data1).c_str(), data2, actStr.c_str());
+            printf("[%s] [%-20s] CC       ch=%-2d %-20s val=%-3d%s\n",
+                   ts.c_str(), devName.c_str(), ch,
+                   g_mapper.getCCDisplayName(data1).c_str(), data2, actStr.c_str());
         } else if (mtype == 0xE0) {
             int bend = (data2 << 7) | data1;
             printf("[%s] [%-20s] PitchBd  ch=%-2d val=%d\n",
                    ts.c_str(), devName.c_str(), ch, bend);
+        } else if (mtype == 0xA0) {
+            printf("[%s] [%-20s] PolyAT   ch=%-2d note=%-3d %-5s pressure=%d\n",
+                   ts.c_str(), devName.c_str(), ch, data1,
+                   getNoteName(data1).c_str(), data2);
+        } else if (mtype == 0xD0) {
+            printf("[%s] [%-20s] ChanAT   ch=%-2d pressure=%d\n",
+                   ts.c_str(), devName.c_str(), ch, data1);
+        } else if (mtype == 0xC0) {
+            printf("[%s] [%-20s] ProgChg  ch=%-2d program=%d\n",
+                   ts.c_str(), devName.c_str(), ch, data1);
         } else {
             printf("[%s] [%-20s] Raw      status=0x%02X d1=%d d2=%d\n",
                    ts.c_str(), devName.c_str(), status, data1, data2);
@@ -346,6 +441,7 @@ void printHelp() {
     printf("  openall           - Open all devices\n");
     printf("  monitor [on|off]  - Toggle real-time MIDI monitor\n");
     printf("  mapping [on|off]  - Toggle key/mouse mapping\n");
+    printf("  mode <hold|toggle|tap> - Set note trigger mode\n");
     printf("  reload            - Reload config file\n");
     printf("  status            - Show current status\n");
     printf("  help              - Show this help\n");
@@ -362,11 +458,15 @@ void printDevices() {
 
 void printStatus() {
     printf("\n=== Status ===\n");
-    printf("  Monitor:    %s\n", g_monitor.load() ? "ON" : "OFF");
-    printf("  Mapping:    %s\n", g_mapping.load() ? "ON" : "OFF");
-    printf("  Sensitivity:%d\n", g_mapper.sensitivity);
-    printf("  Notes:      %d mappings\n", (int)g_mapper.noteMap.size());
-    printf("  CCs:        %d mappings\n", (int)g_mapper.ccMap.size());
+    printf("  Monitor:     %s\n", g_monitor.load() ? "ON" : "OFF");
+    printf("  Mapping:     %s\n", g_mapping.load() ? "ON" : "OFF");
+    printf("  Note Mode:   %s\n", noteModeName(g_mapper.noteMode).c_str());
+    if (g_mapper.noteMode == MODE_TAP)
+        printf("  Tap Duration:%dms\n", g_mapper.tapDuration);
+    printf("  Sensitivity: %d\n", g_mapper.sensitivity);
+    printf("  Notes:       %d mappings\n", (int)g_mapper.noteMap.size());
+    printf("  CCs:         %d mappings\n", (int)g_mapper.ccMap.size());
+    printf("  CC Names:    %d custom\n", (int)g_mapper.ccNames.size());
     printf("  Devices:\n"); printDevices();
     printf("\n");
 }
@@ -379,12 +479,17 @@ int main(int argc, char* argv[]) {
     if (argc > 1) configFile = argv[1];
 
     printf("========================================\n");
-    printf("   MIDI Mapper v1.0\n");
+    printf("   MIDI Mapper v1.1\n");
     printf("========================================\n\n");
 
     if (g_mapper.loadFromFile(configFile)) {
-        printf("Config loaded: %s (%d note, %d CC mappings)\n",
-               configFile.c_str(), (int)g_mapper.noteMap.size(), (int)g_mapper.ccMap.size());
+        printf("Config loaded: %s\n", configFile.c_str());
+        printf("  %d note mappings, %d CC mappings, %d CC names\n",
+               (int)g_mapper.noteMap.size(), (int)g_mapper.ccMap.size(),
+               (int)g_mapper.ccNames.size());
+        printf("  Note mode: %s", noteModeName(g_mapper.noteMode).c_str());
+        if (g_mapper.noteMode == MODE_TAP) printf(" (%dms)", g_mapper.tapDuration);
+        printf("\n");
     } else {
         printf("Warning: Cannot open '%s', no mappings loaded.\n", configFile.c_str());
     }
@@ -436,11 +541,23 @@ int main(int argc, char* argv[]) {
             else g_mapping = !g_mapping.load();
             printf("  Mapping: %s\n", g_mapping.load() ? "ON" : "OFF");
         }
+        else if (cmd.substr(0,5)=="mode ") {
+            string m = cmd.substr(5);
+            m.erase(0, m.find_first_not_of(" \t"));
+            lock_guard<mutex> lk(g_mtx);
+            if (m == "hold") { g_mapper.noteMode = MODE_HOLD; g_mapper.toggleState.clear(); }
+            else if (m == "toggle") { g_mapper.noteMode = MODE_TOGGLE; g_mapper.toggleState.clear(); }
+            else if (m == "tap") g_mapper.noteMode = MODE_TAP;
+            else { printf("  Unknown mode. Use: hold, toggle, tap\n"); continue; }
+            printf("  Note mode: %s\n", noteModeName(g_mapper.noteMode).c_str());
+        }
         else if (cmd=="reload") {
             lock_guard<mutex> lk(g_mtx);
             if (g_mapper.loadFromFile(configFile))
-                printf("  Reloaded: %d note, %d CC mappings\n",
-                       (int)g_mapper.noteMap.size(), (int)g_mapper.ccMap.size());
+                printf("  Reloaded: %d note, %d CC mappings, %d CC names, mode=%s\n",
+                       (int)g_mapper.noteMap.size(), (int)g_mapper.ccMap.size(),
+                       (int)g_mapper.ccNames.size(),
+                       noteModeName(g_mapper.noteMode).c_str());
             else printf("  Failed to reload config\n");
         }
         else if (cmd=="status") printStatus();
